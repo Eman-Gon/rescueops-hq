@@ -134,6 +134,14 @@ class IncidentStateMachine:
             )
         return self.apply_move(decision)
 
+    def after_diagnosis(
+        self,
+        decision: CommanderDecision | None = None,
+    ) -> str:
+        if self.current_state != "diagnosis":
+            raise RuntimeError("after_diagnosis requires the diagnosis state")
+        return self.apply_move(decision)
+
     def after_remediation(
         self,
         action_classes: list[str],

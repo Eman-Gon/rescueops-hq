@@ -65,6 +65,37 @@ def test_illegal_commander_move_uses_default_and_logs_overrule() -> None:
     assert events[-1]["payload"]["applied_move"] == "deep_diagnosis"
 
 
+def test_illegal_diagnosis_move_falls_back_to_dispatch_remediation() -> None:
+    machine = _machine("INC-DIAG-ILLEGAL")
+    machine.after_triage("SEV-2")
+    assert machine.current_state == "diagnosis"
+
+    move = machine.after_diagnosis(
+        CommanderDecision(move="skip_everything", rationale="Bad idea")
+    )
+
+    assert move == "dispatch_remediation"
+    assert machine.current_state == "remediation"
+    events = list_events("INC-DIAG-ILLEGAL")
+    assert events[-1]["type"] == "commander_overruled"
+    assert events[-1]["payload"]["applied_move"] == "dispatch_remediation"
+
+
+def test_diagnosis_can_escalate_to_human() -> None:
+    machine = _machine("INC-DIAG-ESCALATE")
+    machine.after_triage("SEV-2")
+
+    move = machine.after_diagnosis(
+        CommanderDecision(
+            move="escalate_to_human",
+            rationale="Confidence too low to act automatically",
+        )
+    )
+
+    assert move == "escalate_to_human"
+    assert machine.current_state == "escalated"
+
+
 def test_sev3_fast_paths_to_remediation() -> None:
     machine = _machine("INC-SEV3")
 

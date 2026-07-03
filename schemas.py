@@ -69,7 +69,8 @@ class PostmortemReport(BaseModel):
 class RunResult(BaseModel):
     """The full state of an incident run at whatever stage it has reached.
 
-    Progressive autonomy means a run finishes in one of two ways:
+    The Commander, constrained by the policy-parameterized state machine, drives a
+    run to one of three terminal/paused shapes:
       - status="resolved"          — fully done; verification + postmortem present.
                                       Reached AUTONOMOUSLY when remediation produced
                                       no risky actions, or after a human decides on
@@ -78,13 +79,26 @@ class RunResult(BaseModel):
                                       (see `executed_safe`); one or more risky
                                       actions are pending a human decision.
                                       `approval`/`verification`/`postmortem` are null.
+      - status="escalated"         — the Commander escalated to a human instead of
+                                      routing onward: either straight from Diagnosis
+                                      (low confidence; `remediation` is null because
+                                      it never ran) or after Verification failed and
+                                      the policy's retry cap was exhausted (`postmortem`
+                                      stays null; nothing further runs automatically).
+    `diagnosis` is null when the Commander fast-paths a SEV-3 incident (ARCHITECTURE
+    §3.2: fast_path skips deep diagnosis entirely — no artifact is fabricated for it).
     """
     run_id: str = Field(description="UUID for this pipeline run")
     incident_id: str = Field(description="The incident that was processed")
-    status: str = Field(description='"awaiting_approval" or "resolved"')
+    status: str = Field(description='"awaiting_approval" | "resolved" | "escalated"')
     triage: TriageReport
-    diagnosis: DiagnosisReport
-    remediation: RemediationPlan
+    diagnosis: Optional[DiagnosisReport] = Field(
+        default=None, description="Null when the Commander fast-paths a SEV-3 incident"
+    )
+    remediation: Optional[RemediationPlan] = Field(
+        default=None,
+        description="Null when the Commander escalates straight from diagnosis (remediation never ran)",
+    )
     executed_safe: list[RemediationAction] = Field(
         default_factory=list,
         description="Safe actions auto-executed without a human approval gate",
@@ -94,9 +108,18 @@ class RunResult(BaseModel):
         description="Null until a risky-action decision is made (auto when no risky actions)",
     )
     verification: Optional[VerificationReport] = Field(
-        default=None, description="Null until the run is resolved"
+        default=None, description="Null until the run is resolved or escalated post-verification"
     )
     postmortem: Optional[PostmortemReport] = Field(
         default=None, description="Null until the run is resolved"
     )
     chaos_config: Optional[Dict[str, Any]] = Field(default=None, description="Chaos parameters injected for this run, if any")
+    state_snapshot: Optional[str] = Field(
+        default=None,
+        description=(
+            "IncidentStateMachine.to_json() captured at pause/terminal, so "
+            "resume_after_approval can reconstruct the exact machine (state + retry "
+            "counts). In-memory only for now — not yet persisted to Makers storage; "
+            "see ARCHITECTURE §7."
+        ),
+    )
