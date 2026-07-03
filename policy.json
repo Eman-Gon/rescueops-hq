@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "initial_state": "opened",
+  "states": {
+    "opened": {
+      "transitions": {
+        "dispatch_triage": "triage"
+      },
+      "default_move": "dispatch_triage",
+      "commander_decides": false
+    },
+    "triage": {
+      "transitions": {
+        "fast_path": "remediation",
+        "deep_diagnosis": "diagnosis"
+      },
+      "default_move": "deep_diagnosis",
+      "commander_decides": true
+    },
+    "diagnosis": {
+      "transitions": {
+        "dispatch_remediation": "remediation",
+        "escalate_to_human": "escalated"
+      },
+      "default_move": "dispatch_remediation",
+      "commander_decides": true
+    },
+    "remediation": {
+      "transitions": {
+        "request_approval": "awaiting_approval",
+        "dispatch_verification": "verification"
+      },
+      "default_move": "dispatch_verification",
+      "commander_decides": false
+    },
+    "awaiting_approval": {
+      "transitions": {
+        "approval_granted": "verification",
+        "approval_denied": "verification"
+      },
+      "default_move": "approval_denied",
+      "commander_decides": false
+    },
+    "verification": {
+      "transitions": {
+        "verification_passed": "postmortem",
+        "verification_failed": "verification_decision"
+      },
+      "default_move": "verification_failed",
+      "commander_decides": false
+    },
+    "verification_decision": {
+      "transitions": {
+        "retry_remediation": "remediation",
+        "escalate": "escalated"
+      },
+      "default_move": "escalate",
+      "commander_decides": true
+    },
+    "postmortem": {
+      "transitions": {
+        "resolve": "resolved"
+      },
+      "default_move": "resolve",
+      "commander_decides": false
+    },
+    "resolved": {
+      "transitions": {},
+      "default_move": null,
+      "commander_decides": false,
+      "terminal": true
+    },
+    "escalated": {
+      "transitions": {},
+      "default_move": null,
+      "commander_decides": false,
+      "terminal": true
+    }
+  },
+  "retry_caps": {
+    "verification": 1
+  },
+  "approval_forced_action_classes": [
+    "risky"
+  ]
+}

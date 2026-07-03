@@ -1,0 +1,20 @@
+# Generated audit/eval database (created by audit.py)
+*.db
+
+# Secrets
+.env
+
+# Agent/editor skills (installed via npx skills add; not project code)
+.agents/
+.claude/skills/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/

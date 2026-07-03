@@ -1,0 +1,108 @@
+{
+  "run_id": "31e95d35-5cea-4534-af74-3420beffaa7e",
+  "incident_id": "INC-001-checkout-db-pool",
+  "triage": {
+    "severity": "SEV-1",
+    "customer_facing": true,
+    "summary": "Checkout API experiencing 37% error rate due to database connection pool exhaustion following checkout-v42 deployment that tripled worker concurrency",
+    "route_to": "Diagnosis",
+    "reason": "SEV-1 because: (1) Checkout is directly customer-facing and revenue-critical; (2) 37% of checkout requests are failing with 500 errors; (3) P99 latency has spiked from 220ms to 4100ms indicating widespread degradation; (4) DB connections are at 100% saturation causing cascading failures; (5) Clear correlation with checkout-v42 deploy 6 minutes prior that increased worker concurrency from 8 to 24, likely exhausting connection pool. This is major revenue impact requiring immediate escalation. Route to Diagnosis for confirmation and potential rollback of checkout-v42."
+  },
+  "diagnosis": {
+    "root_cause": "The checkout-v42 deployment at 14:02 UTC tripled worker concurrency from 8 to 24, exhausting the PostgreSQL database connection pool (100% utilization) and causing 37% of checkout requests to fail with 500 errors due to connection acquisition timeouts.",
+    "cited_evidence": [
+      "deploys[0].change: raised worker concurrency 8 -> 24",
+      "deploys[0].at: 14:02 UTC (6 minutes before alert)",
+      "deploys[0].version: checkout-v42",
+      "metrics.db_connections_used_pct: before=45, now=100",
+      "metrics.checkout_worker_concurrency: before=8, now=24",
+      "metrics.checkout_error_rate: before=0.01, now=0.37",
+      "metrics.p99_latency_ms: before=220, now=4100",
+      "logs: ERROR checkout-svc: psycopg2.OperationalError: FATAL: remaining connection slots are reserved / too many connections",
+      "logs: WARN checkout-svc: db pool acquire timeout after 3000ms",
+      "logs: INFO deploy-bot: checkout-v42 rolled out to prod at 14:02 UTC",
+      "logs: ERROR checkout-svc: request failed, 500 returned to client"
+    ],
+    "confidence": 1.0,
+    "reasoning": "The causal chain is clear and supported by multiple converging telemetry signals:\n\n1. **Deployment Event (Trigger):** At 14:02 UTC, checkout-v42 was deployed with a configuration change that increased worker concurrency from 8 to 24 (3x increase). This is documented in the deploy logs and deploy metadata.\n\n2. **Resource Exhaustion (Direct Effect):** Each worker maintains its own database connection. Tripling workers from 8 to 24 caused proportional increase in connection demand. The db_connections_used_pct metric shows saturation: it jumped from 45% to 100%. The PostgreSQL error log confirms this: \"FATAL: remaining connection slots are reserved / too many connections\".\n\n3. **Connection Pool Starvation (Cascade):** With no available connections, requests began timing out waiting to acquire a connection from the pool. The warning log shows \"db pool acquire timeout after 3000ms\", which directly correlates with the p99 latency spike from 220ms to 4100ms.\n\n4. **Customer-Facing Failures (Outcome):** Requests that cannot acquire a database connection fail with 500 errors. The checkout_error_rate increased from 1% to 37%, directly matching the alert threshold breach. The error log confirms: \"request failed, 500 returned to client\".\n\n5. **Timing Correlation:** The deployment occurred 6 minutes before the alert fired. This timing aligns with gradual connection pool exhaustion as traffic accumulated against the new higher-concurrency configuration.\n\nThe root cause is definitively the checkout-v42 deployment's worker concurrency increase, which was not matched by a corresponding increase in database connection pool capacity or max_connections on the PostgreSQL server. Recommended remediation is immediate rollback to checkout-v41 or reduction of worker concurrency back to 8, followed by a properly sized connection pool configuration for the desired concurrency level."
+  },
+  "remediation": {
+    "safe": [
+      {
+        "action": "Add a temporary alert on db_connections_used_pct threshold at 80% to catch future connection pool exhaustion before customer impact",
+        "rationale": "Provides early warning if connection usage climbs again during or after remediation, allowing proactive intervention before 100% saturation recurs",
+        "destructive": false
+      },
+      {
+        "action": "Document the incident timeline and root cause in the incident channel: checkout-v42 deployed at 14:02 UTC changed worker concurrency from 8 to 24 without corresponding connection pool sizing, causing PostgreSQL connection exhaustion",
+        "rationale": "Ensures all responders have shared context and creates an audit trail for post-incident review",
+        "destructive": false
+      },
+      {
+        "action": "Verify current db_connections_used_pct and checkout_error_rate metrics in real-time dashboard to establish baseline before applying remediation",
+        "rationale": "Confirms current state severity and will allow us to measure remediation effectiveness after rollback or config change is applied",
+        "destructive": false
+      }
+    ],
+    "risky": [
+      {
+        "action": "Roll back checkout-svc from checkout-v42 to checkout-v41 using deploy-bot: `deploy-bot rollback checkout --to-version checkout-v41`",
+        "rationale": "Directly reverses the deployment that caused the incident by restoring worker concurrency to 8, immediately reducing database connection demand from 24 workers back to 8 and freeing connection pool capacity",
+        "destructive": true
+      },
+      {
+        "action": "If rollback is blocked or too slow, apply emergency config override to reduce checkout-svc worker concurrency from 24 to 8: `kubectl set env deployment/checkout-svc WORKER_CONCURRENCY=8 --namespace=prod`",
+        "rationale": "Alternative path to achieve the same result as rollback - reduces connection demand to pre-incident levels. Use only if rollback cannot proceed; requires pod restart to take effect",
+        "destructive": true
+      },
+      {
+        "action": "After traffic stabilizes, if higher concurrency (24 workers) is still desired, increase PostgreSQL max_connections and checkout-svc connection pool size proportionally (e.g., pool_size from current value to at least 3x) before re-deploying checkout-v42",
+        "rationale": "Addresses the underlying capacity mismatch that caused the incident: tripling workers requires proportional increase in connection capacity to avoid pool exhaustion",
+        "destructive": true
+      }
+    ]
+  },
+  "approval": {
+    "approved": true,
+    "approver": "human-ui",
+    "note": "Operator approved risky actions via UI"
+  },
+  "verification": {
+    "recovered": true,
+    "metric_name": "checkout_error_rate",
+    "observed_value": 0.01,
+    "threshold": 0.05,
+    "note": "Projected post-remediation value over simulated telemetry, not a live re-measurement. Rollback to checkout-v41 was approved and directly reverses the root cause (worker concurrency 24→8), reducing db_connections_used_pct from 100% back to ~45% and restoring checkout_error_rate to baseline ~1%."
+  },
+  "postmortem": {
+    "summary": "On the incident date, the checkout-v42 deployment at 14:02 UTC caused a SEV-1 outage affecting the customer-facing Checkout API. The deployment tripled worker concurrency from 8 to 24 without a corresponding increase in PostgreSQL connection pool capacity, resulting in 100% database connection saturation. This caused 37% of checkout requests to fail with 500 errors and p99 latency to spike from 220ms to 4100ms. The alert fired 6 minutes after deployment. Following diagnosis confirming the root cause, the incident was resolved by rolling back to checkout-v41, which restored worker concurrency to 8 and returned the checkout error rate to baseline (~1%) and database connection utilization to ~45%.",
+    "timeline": [
+      "14:02 UTC - deploy-bot: checkout-v42 rolled out to prod, changing worker concurrency from 8 to 24",
+      "14:02 UTC to 14:08 UTC - Database connection pool gradually exhausted as traffic accumulated against higher concurrency configuration",
+      "~14:08 UTC - Alert fired: Checkout API 5xx error rate at 37% (threshold 5%) for 4 minutes",
+      "~14:08 UTC - Logs show: ERROR checkout-svc: psycopg2.OperationalError: FATAL: remaining connection slots are reserved / too many connections",
+      "~14:08 UTC - Logs show: WARN checkout-svc: db pool acquire timeout after 3000ms",
+      "~14:08 UTC - Logs show: ERROR checkout-svc: request failed, 500 returned to client",
+      "~14:08 UTC - Metrics confirmed: db_connections_used_pct at 100%, checkout_error_rate at 37%, p99_latency_ms at 4100ms",
+      "Post-diagnosis - Operator approved risky actions including rollback via human-ui",
+      "Post-approval - Rollback executed: deploy-bot rollback checkout --to-version checkout-v41",
+      "Post-rollback - Verification confirmed recovery: checkout_error_rate returned to 0.01 (1%), db_connections_used_pct returned to ~45%"
+    ],
+    "root_cause": "The checkout-v42 deployment at 14:02 UTC tripled worker concurrency from 8 to 24 without a corresponding increase in PostgreSQL database connection pool capacity. Each worker maintains its own database connection, so tripling workers caused proportional increase in connection demand. This exhausted the connection pool (100% utilization), causing new requests to timeout waiting for connections (3000ms acquire timeout) and resulting in 37% of checkout requests failing with 500 errors due to connection acquisition failures. The configuration change was deployed without validating that the database infrastructure could support the increased connection demand.",
+    "actions_taken": [
+      "Added temporary alert on db_connections_used_pct threshold at 80% to catch future connection pool exhaustion before customer impact",
+      "Documented incident timeline and root cause in the incident channel: checkout-v42 deployed at 14:02 UTC changed worker concurrency from 8 to 24 without corresponding connection pool sizing, causing PostgreSQL connection exhaustion",
+      "Verified current db_connections_used_pct and checkout_error_rate metrics in real-time dashboard to establish baseline before applying remediation",
+      "Rolled back checkout-svc from checkout-v42 to checkout-v41 using deploy-bot: deploy-bot rollback checkout --to-version checkout-v41 (approved by operator via human-ui)"
+    ],
+    "follow_ups": [
+      "[TICKET] Add pre-deployment validation check to CI/CD pipeline that blocks deployments increasing worker concurrency without proportional connection pool capacity increase",
+      "[TICKET] Implement permanent alert on db_connections_used_pct with 80% warning threshold and 90% critical threshold with PagerDuty escalation",
+      "[TICKET] Add runbook documentation for checkout-svc connection pool exhaustion incidents including rollback procedure and config override commands",
+      "[TICKET] Review and update checkout-svc deployment configuration to ensure worker concurrency changes require explicit connection pool sizing verification",
+      "[TICKET] Before re-deploying checkout-v42 with 24 workers: increase PostgreSQL max_connections and checkout-svc pool_size to at least 3x current values to match desired concurrency",
+      "[TICKET] Add load testing requirement for configuration changes that affect database connection usage patterns"
+    ]
+  },
+  "chaos_config": null
+}

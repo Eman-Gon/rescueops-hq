@@ -1,0 +1,160 @@
+{
+  "schema_note": "Each incident gives the agents observable telemetry (logs/metrics/deploys) and a ground_truth block used ONLY by the eval harness to score the run. Agents never see ground_truth.",
+  "incidents": [
+    {
+      "id": "INC-001-checkout-db-pool",
+      "title": "Checkout API error rate spiking",
+      "alert": "Checkout API 5xx error rate at 37% (threshold 5%) for 4 minutes.",
+      "telemetry": {
+        "logs": [
+          "ERROR checkout-svc: psycopg2.OperationalError: FATAL: remaining connection slots are reserved / too many connections",
+          "WARN  checkout-svc: db pool acquire timeout after 3000ms",
+          "INFO  deploy-bot: checkout-v42 rolled out to prod at 14:02 UTC",
+          "ERROR checkout-svc: request failed, 500 returned to client"
+        ],
+        "metrics": {
+          "checkout_error_rate": {"before": 0.01, "now": 0.37},
+          "db_connections_used_pct": {"before": 45, "now": 100},
+          "checkout_worker_concurrency": {"before": 8, "now": 24},
+          "p99_latency_ms": {"before": 220, "now": 4100}
+        },
+        "deploys": [
+          {"service": "checkout", "version": "checkout-v42", "at": "14:02 UTC", "minutes_before_alert": 6, "change": "raised worker concurrency 8 -> 24"}
+        ]
+      },
+      "ground_truth": {
+        "severity": "SEV-2",
+        "root_cause": "Deploy checkout-v42 raised worker concurrency, exhausting the DB connection pool (max 100).",
+        "expected_evidence": ["checkout_error_rate", "db_connections_used_pct", "deploy checkout-v42", "too many connections"],
+        "remediation": {
+          "safe": ["Lower checkout_worker_concurrency back to 8", "Restart checkout pods one-by-one", "Add a DB connection-pool saturation alert"],
+          "risky": ["Roll back deploy checkout-v42", "Raise Postgres max_connections"]
+        },
+        "recovery_metric": {"name": "checkout_error_rate", "below": 0.05}
+      }
+    },
+    {
+      "id": "INC-002-payment-latency-baddeploy",
+      "title": "Payment service latency spike",
+      "alert": "Payment service p99 latency at 3.8s (threshold 800ms) for 6 minutes.",
+      "telemetry": {
+        "logs": [
+          "WARN  payment-svc: synchronous fraud-check call took 3600ms",
+          "INFO  deploy-bot: payment-v17 rolled out to prod at 09:14 UTC",
+          "WARN  payment-svc: fraud-check now called inline per request (was async)",
+          "INFO  payment-svc: success rate steady at 99.9%"
+        ],
+        "metrics": {
+          "payment_p99_latency_ms": {"before": 700, "now": 3800},
+          "payment_error_rate": {"before": 0.002, "now": 0.003},
+          "fraud_check_call_ms": {"before": 40, "now": 3600},
+          "payment_throughput_rps": {"before": 120, "now": 118}
+        },
+        "deploys": [
+          {"service": "payment", "version": "payment-v17", "at": "09:14 UTC", "minutes_before_alert": 8, "change": "moved fraud-check from async queue to inline synchronous call"}
+        ]
+      },
+      "ground_truth": {
+        "severity": "SEV-2",
+        "root_cause": "Deploy payment-v17 changed the fraud-check from async to a synchronous inline call, adding ~3.6s per request to p99 latency. Error rate is unaffected.",
+        "expected_evidence": ["payment_p99_latency_ms", "fraud_check_call_ms", "deploy payment-v17"],
+        "remediation": {
+          "safe": ["Re-enable async fraud-check via feature flag", "Add latency budget alert on fraud-check"],
+          "risky": ["Roll back deploy payment-v17"]
+        },
+        "recovery_metric": {"name": "payment_p99_latency_ms", "below": 800}
+      }
+    },
+    {
+      "id": "INC-003-redis-cache-outage",
+      "title": "Cache outage causing database overload",
+      "alert": "Product DB CPU at 96% and rising; product-page latency degraded.",
+      "telemetry": {
+        "logs": [
+          "ERROR product-svc: redis connection refused (10.0.3.7:6379)",
+          "WARN  product-svc: cache miss rate 98%, falling back to primary DB",
+          "ERROR redis: node 10.0.3.7 unreachable, no replica promoted",
+          "WARN  product-db: query queue depth 1400 (normal < 50)"
+        ],
+        "metrics": {
+          "redis_availability": {"before": 1.0, "now": 0.0},
+          "cache_miss_rate": {"before": 0.07, "now": 0.98},
+          "product_db_cpu_pct": {"before": 35, "now": 96},
+          "product_page_p99_ms": {"before": 180, "now": 2600}
+        },
+        "deploys": []
+      },
+      "ground_truth": {
+        "severity": "SEV-1",
+        "root_cause": "Redis cache node went down with no replica promotion, sending nearly all reads to the primary DB and overloading it. Not deploy-related.",
+        "expected_evidence": ["redis_availability", "cache_miss_rate", "product_db_cpu_pct"],
+        "remediation": {
+          "safe": ["Enable request coalescing / rate-limit on product-svc to shed DB load", "Serve stale-but-ok cached responses if any layer remains"],
+          "risky": ["Restart / fail over the Redis node", "Promote a Redis replica to primary"]
+        },
+        "recovery_metric": {"name": "product_db_cpu_pct", "below": 60}
+      }
+    },
+    {
+      "id": "INC-004-autoscaler-underprovisioned",
+      "title": "API gateway latency from autoscaler under-provisioning",
+      "alert": "api-gateway p95 latency at 3.1x baseline (430ms); pods CPU-throttled.",
+      "telemetry": {
+        "logs": [
+          "INFO  ops: maintenance window MAINT-2231 lowered api-gateway HPA minReplicas 6 -> 2 at 02:00 UTC; the post-maintenance restore step was skipped",
+          "WARN  api-gateway: CPU throttling active on all pods (cfs throttled 78% of periods)",
+          "INFO  hpa/api-gateway: desiredReplicas pinned at minReplicas=2 despite high CPU; no reconciler or deploy is re-applying the value",
+          "INFO  api-gateway: all requests returning 200; latency elevated under load"
+        ],
+        "metrics": {
+          "gateway_p95_latency_ms": {"before": 140, "now": 430},
+          "api_gateway_replicas": {"before": 6, "now": 2},
+          "hpa_min_replicas": {"before": 6, "now": 2},
+          "cpu_throttle_pct": {"before": 3, "now": 78},
+          "gateway_error_rate": {"before": 0.002, "now": 0.003}
+        },
+        "deploys": []
+      },
+      "ground_truth": {
+        "severity": "SEV-2",
+        "root_cause": "During maintenance window MAINT-2231 an operator lowered api-gateway HPA minReplicas from 6 to 2 and the post-maintenance restore was skipped; with only 2 pods under normal traffic the pods CPU-throttled and p95 latency tripled. Requests still succeed — no code or data fault, and nothing is re-applying the change, so restoring capacity fully resolves it.",
+        "expected_evidence": ["hpa_min_replicas", "gateway_p95_latency_ms", "cpu_throttle_pct"],
+        "remediation": {
+          "safe": ["Scale api-gateway back to 6 replicas", "Restore HPA minReplicas to 6", "Add an alert on hpa_min_replicas below the configured floor"],
+          "risky": []
+        },
+        "recovery_metric": {"name": "gateway_p95_latency_ms", "below": 200}
+      }
+    },
+    {
+      "id": "INC-005-expired-api-key",
+      "title": "Third-party geocoding API failing",
+      "alert": "Address-validation step failing for 100% of checkouts in 2 regions.",
+      "telemetry": {
+        "logs": [
+          "ERROR geo-proxy: upstream returned 401 Unauthorized from maps-vendor",
+          "INFO  geo-proxy: api key id gk_live_8821 last rotated 366 days ago",
+          "WARN  checkout-svc: address validation unavailable, blocking checkout",
+          "INFO  maps-vendor status page: all systems operational"
+        ],
+        "metrics": {
+          "geocoding_success_rate": {"before": 0.999, "now": 0.0},
+          "geocoding_http_401_rate": {"before": 0.0, "now": 1.0},
+          "checkout_completion_rate": {"before": 0.94, "now": 0.61},
+          "maps_vendor_reported_uptime": {"before": 1.0, "now": 1.0}
+        },
+        "deploys": []
+      },
+      "ground_truth": {
+        "severity": "SEV-2",
+        "root_cause": "The maps-vendor API key (gk_live_8821) expired at its 365-day rotation, returning 401s and blocking address validation. The vendor itself is healthy.",
+        "expected_evidence": ["geocoding_http_401_rate", "api key last rotated 366 days ago", "maps_vendor_reported_uptime"],
+        "remediation": {
+          "safe": ["Make address validation non-blocking (soft-fail) so checkout proceeds", "Page the team that owns vendor credentials"],
+          "risky": ["Rotate and deploy a new maps-vendor API key"]
+        },
+        "recovery_metric": {"name": "geocoding_success_rate", "below_is_bad": true, "above": 0.95}
+      }
+    }
+  ]
+}
